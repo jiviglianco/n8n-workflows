@@ -1,0 +1,497 @@
+{
+  "name": "02 - Webhook Validation → Google Sheets + Slack (with Daily Digest)",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## A. Real-time ingest\n\nAny system (payment provider, e-commerce platform, internal app) POSTs an *order event* here.\n\n**Set → Map Fields** isolates the fields we care about so the rest of the flow never depends on the sender's exact payload shape.\n\n**Code → Validate** checks required fields and types, and builds a deterministic `dedupeKey` (`source:event_id`). Keys seen in the last 5 000 events are rejected as duplicates.",
+        "height": 340,
+        "width": 620,
+        "color": 4
+      },
+      "id": "b2000000-0000-4000-8000-000000000101",
+      "name": "Note: Ingest",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [0, -60]
+    },
+    {
+      "parameters": {
+        "content": "## B. Valid → persist + notify\n\nValid events are appended to the **Events** sheet and announced in Slack `#orders`. The sender gets **200**.\n\n## C. Invalid → alert ops\n\nInvalid events are *not* stored. Slack `#ops` receives the error list and the raw payload; the sender gets **422** with the same errors so they can fix their integration.",
+        "height": 480,
+        "width": 800,
+        "color": 5
+      },
+      "id": "b2000000-0000-4000-8000-000000000102",
+      "name": "Note: Routing",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [660, -60]
+    },
+    {
+      "parameters": {
+        "content": "## D. Daily digest (08:00)\n\nA second trigger in the same workflow reads the **Events** sheet every morning, keeps only yesterday's rows (`received_at` starts with yesterday's date), aggregates count / total amount / breakdown by source, and posts a summary to Slack `#orders`.\n\n*Filter* has **Always Output Data** enabled so the digest is posted even on a day with zero events.",
+        "height": 300,
+        "width": 1100,
+        "color": 6
+      },
+      "id": "b2000000-0000-4000-8000-000000000103",
+      "name": "Note: Digest",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [0, 560]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "order-events",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000001",
+      "name": "Order Event Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [80, 120],
+      "webhookId": "00000000-0000-4000-8000-0000000000b2"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "s2000000-0000-4000-8000-000000000001",
+              "name": "event_id",
+              "value": "={{ $json.body.event_id ?? $json.body.id ?? '' }}",
+              "type": "string"
+            },
+            {
+              "id": "s2000000-0000-4000-8000-000000000002",
+              "name": "source",
+              "value": "={{ $json.body.source ?? $json.headers['x-source'] ?? 'unknown' }}",
+              "type": "string"
+            },
+            {
+              "id": "s2000000-0000-4000-8000-000000000003",
+              "name": "customer_email",
+              "value": "={{ ($json.body.customer_email ?? $json.body.email ?? '').toString().trim().toLowerCase() }}",
+              "type": "string"
+            },
+            {
+              "id": "s2000000-0000-4000-8000-000000000004",
+              "name": "amount",
+              "value": "={{ $json.body.amount ?? null }}",
+              "type": "number"
+            },
+            {
+              "id": "s2000000-0000-4000-8000-000000000005",
+              "name": "currency",
+              "value": "={{ ($json.body.currency ?? 'USD').toString().toUpperCase() }}",
+              "type": "string"
+            },
+            {
+              "id": "s2000000-0000-4000-8000-000000000006",
+              "name": "status",
+              "value": "={{ ($json.body.status ?? '').toString().toLowerCase() }}",
+              "type": "string"
+            },
+            {
+              "id": "s2000000-0000-4000-8000-000000000007",
+              "name": "received_at",
+              "value": "={{ $now.toISO() }}",
+              "type": "string"
+            },
+            {
+              "id": "s2000000-0000-4000-8000-000000000008",
+              "name": "raw",
+              "value": "={{ $json.body }}",
+              "type": "object"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {
+          "ignoreConversionErrors": true
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000002",
+      "name": "Map Fields",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [300, 120]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate the mapped event: required fields, types, allowed values, dedupe.\nconst REQUIRED = ['event_id', 'source', 'customer_email', 'amount', 'currency', 'status'];\nconst ALLOWED_STATUS = ['created', 'paid', 'refunded', 'cancelled'];\nconst ALLOWED_CURRENCY = ['USD', 'EUR', 'GBP', 'ARS', 'BRL', 'MXN'];\nconst EMAIL_RE = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/;\nconst MAX_SEEN = 5000;\n\n// Static data survives between production executions (not in manual test runs).\nconst store = $getWorkflowStaticData('global');\nstore.seenKeys = Array.isArray(store.seenKeys) ? store.seenKeys : [];\n\nreturn $input.all().map((item) => {\n  const e = item.json;\n  const errors = [];\n\n  for (const f of REQUIRED) {\n    const v = e[f];\n    if (v === undefined || v === null || v === '') errors.push(`${f} is required`);\n  }\n\n  if (e.amount !== null && e.amount !== undefined) {\n    if (typeof e.amount !== 'number' || Number.isNaN(e.amount)) errors.push('amount must be a number');\n    else if (e.amount < 0) errors.push('amount must be >= 0');\n  }\n  if (e.customer_email && !EMAIL_RE.test(e.customer_email)) errors.push('customer_email is not a valid e-mail');\n  if (e.status && !ALLOWED_STATUS.includes(e.status)) errors.push(`status must be one of ${ALLOWED_STATUS.join(', ')}`);\n  if (e.currency && !ALLOWED_CURRENCY.includes(e.currency)) errors.push(`currency must be one of ${ALLOWED_CURRENCY.join(', ')}`);\n\n  const dedupeKey = `${String(e.source).toLowerCase()}:${String(e.event_id).toLowerCase()}`;\n  if (errors.length === 0) {\n    if (store.seenKeys.includes(dedupeKey)) {\n      errors.push(`duplicate event (dedupe key ${dedupeKey})`);\n    } else {\n      store.seenKeys.push(dedupeKey);\n      if (store.seenKeys.length > MAX_SEEN) store.seenKeys = store.seenKeys.slice(-MAX_SEEN);\n    }\n  }\n\n  return {\n    json: {\n      ...e,\n      dedupe_key: dedupeKey,\n      valid: errors.length === 0,\n      errors,\n    },\n  };\n});"
+      },
+      "id": "b2000000-0000-4000-8000-000000000003",
+      "name": "Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 120]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c2000000-0000-4000-8000-000000000001",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000004",
+      "name": "Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [740, 120]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "PLACEHOLDER_SPREADSHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Events"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "received_at": "={{ $json.received_at }}",
+            "event_id": "={{ $json.event_id }}",
+            "source": "={{ $json.source }}",
+            "customer_email": "={{ $json.customer_email }}",
+            "amount": "={{ $json.amount }}",
+            "currency": "={{ $json.currency }}",
+            "status": "={{ $json.status }}",
+            "dedupe_key": "={{ $json.dedupe_key }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            { "id": "received_at", "displayName": "received_at", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "event_id", "displayName": "event_id", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "source", "displayName": "source", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "customer_email", "displayName": "customer_email", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "amount", "displayName": "amount", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "currency", "displayName": "currency", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "status", "displayName": "status", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "dedupe_key", "displayName": "dedupe_key", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000005",
+      "name": "Google Sheets: Append Event",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1000, 20],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "PLACEHOLDER_CRED_ID_GSHEETS",
+          "name": "Google Sheets (OAuth2)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "accessToken",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#orders"
+        },
+        "text": "=:white_check_mark: *{{ $('Validate').item.json.status }}* event `{{ $('Validate').item.json.event_id }}` from `{{ $('Validate').item.json.source }}`\n{{ $('Validate').item.json.customer_email }} — {{ $('Validate').item.json.amount }} {{ $('Validate').item.json.currency }}",
+        "otherOptions": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000006",
+      "name": "Slack: Notify #orders",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1240, 20],
+      "credentials": {
+        "slackApi": {
+          "id": "PLACEHOLDER_CRED_ID_SLACK",
+          "name": "Slack Bot Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'accepted', event_id: $('Validate').item.json.event_id, dedupe_key: $('Validate').item.json.dedupe_key } }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000007",
+      "name": "Respond 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1480, 20]
+    },
+    {
+      "parameters": {
+        "authentication": "accessToken",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#ops"
+        },
+        "text": "=:rotating_light: *Rejected order event* from `{{ $json.source }}` (event_id: `{{ $json.event_id || 'n/a' }}`)\n*Errors:*\n{{ $json.errors.map(e => '• ' + e).join('\\n') }}\n*Raw payload:*\n```{{ JSON.stringify($json.raw, null, 2).slice(0, 1500) }}```",
+        "otherOptions": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000008",
+      "name": "Slack: Alert #ops",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1000, 260],
+      "credentials": {
+        "slackApi": {
+          "id": "PLACEHOLDER_CRED_ID_SLACK",
+          "name": "Slack Bot Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'rejected', errors: $('Validate').item.json.errors } }}",
+        "options": {
+          "responseCode": 422
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000009",
+      "name": "Respond 422",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1240, 260]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 8,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000010",
+      "name": "Daily 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [80, 720]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "PLACEHOLDER_SPREADSHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Events"
+        },
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000011",
+      "name": "Google Sheets: Read Events",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [300, 720],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "PLACEHOLDER_CRED_ID_GSHEETS",
+          "name": "Google Sheets (OAuth2)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c2000000-0000-4000-8000-000000000002",
+              "leftValue": "={{ String($json.received_at || '') }}",
+              "rightValue": "={{ $now.minus({ days: 1 }).toFormat('yyyy-LL-dd') }}",
+              "operator": {
+                "type": "string",
+                "operation": "startsWith"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000012",
+      "name": "Yesterday Only",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [520, 720],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregate yesterday's rows into a single summary item.\n// \"Yesterday Only\" has Always Output Data on, so on an empty day we receive one empty item.\nconst rows = $input.all().map((i) => i.json).filter((r) => r && r.event_id);\n\nconst bySource = {};\nconst byStatus = {};\nlet total = 0;\nfor (const r of rows) {\n  bySource[r.source] = (bySource[r.source] || 0) + 1;\n  byStatus[r.status] = (byStatus[r.status] || 0) + 1;\n  const amt = Number(r.amount);\n  if (!Number.isNaN(amt) && r.status === 'paid') total += amt;\n}\n\nconst fmt = (obj) => Object.entries(obj).map(([k, v]) => `${k}: ${v}`).join(', ') || 'none';\nconst date = $now.minus({ days: 1 }).toFormat('yyyy-LL-dd');\n\nreturn [{\n  json: {\n    date,\n    count: rows.length,\n    paidTotal: Math.round(total * 100) / 100,\n    bySource: fmt(bySource),\n    byStatus: fmt(byStatus),\n  },\n}];"
+      },
+      "id": "b2000000-0000-4000-8000-000000000013",
+      "name": "Aggregate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [740, 720]
+    },
+    {
+      "parameters": {
+        "authentication": "accessToken",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#orders"
+        },
+        "text": "=:bar_chart: *Daily order digest — {{ $json.date }}*\n• Events received: *{{ $json.count }}*\n• Paid total: *{{ $json.paidTotal }}*\n• By source: {{ $json.bySource }}\n• By status: {{ $json.byStatus }}",
+        "otherOptions": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000014",
+      "name": "Slack: Post Digest",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [960, 720],
+      "credentials": {
+        "slackApi": {
+          "id": "PLACEHOLDER_CRED_ID_SLACK",
+          "name": "Slack Bot Token"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Order Event Webhook": {
+      "main": [
+        [
+          { "node": "Map Fields", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Map Fields": {
+      "main": [
+        [
+          { "node": "Validate", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Validate": {
+      "main": [
+        [
+          { "node": "Valid?", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Valid?": {
+      "main": [
+        [
+          { "node": "Google Sheets: Append Event", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Slack: Alert #ops", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Google Sheets: Append Event": {
+      "main": [
+        [
+          { "node": "Slack: Notify #orders", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Slack: Notify #orders": {
+      "main": [
+        [
+          { "node": "Respond 200", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Slack: Alert #ops": {
+      "main": [
+        [
+          { "node": "Respond 422", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Daily 08:00": {
+      "main": [
+        [
+          { "node": "Google Sheets: Read Events", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Google Sheets: Read Events": {
+      "main": [
+        [
+          { "node": "Yesterday Only", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Yesterday Only": {
+      "main": [
+        [
+          { "node": "Aggregate", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Aggregate": {
+      "main": [
+        [
+          { "node": "Slack: Post Digest", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "PLACEHOLDER_INSTANCE_ID",
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

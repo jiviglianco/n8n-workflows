@@ -1,0 +1,402 @@
+{
+  "name": "01 - Lead Intake, Enrichment & CRM Routing",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 1. Intake\n\nA website form POSTs JSON to this webhook.\n\nExpected body:\n```json\n{ \"name\": \"Jane Doe\", \"email\": \"jane@acme.com\",\n  \"company\": \"Acme\", \"message\": \"...\", \"source\": \"pricing-page\" }\n```\n\nResponse is handled by the **Respond to Webhook** nodes (mode = *Using Respond to Webhook node*), so the form gets a real 200 / 400 back.",
+        "height": 320,
+        "width": 420,
+        "color": 4
+      },
+      "id": "a1000000-0000-4000-8000-000000000101",
+      "name": "Note: Intake",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [0, -40]
+    },
+    {
+      "parameters": {
+        "content": "## 2. Normalise & validate\n\nPure JavaScript, no external calls:\n- trims every string field\n- lower-cases the e-mail\n- splits `name` into `firstName` / `lastName`\n- validates the e-mail with a regex\n- extracts the e-mail domain\n\nInvalid payloads take the **false** branch of *Is Valid?* and get an HTTP **400** with the list of errors.",
+        "height": 320,
+        "width": 520,
+        "color": 5
+      },
+      "id": "a1000000-0000-4000-8000-000000000102",
+      "name": "Note: Validation",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [460, -40]
+    },
+    {
+      "parameters": {
+        "content": "## 3. Enrichment\n\nCalls a third-party enrichment API (placeholder URL) with header auth from a named credential.\n\n**Resilience:** 3 retries with 1 s back-off, and *On Error → continue (error output)*. If the API is down the lead still flows through *Build Lead Profile* with an empty enrichment block, so you never lose a lead because a vendor had an outage.",
+        "height": 320,
+        "width": 480,
+        "color": 6
+      },
+      "id": "a1000000-0000-4000-8000-000000000103",
+      "name": "Note: Enrichment",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1020, -40]
+    },
+    {
+      "parameters": {
+        "content": "## 4. Routing\n\n`isBusiness` is true when the e-mail domain is **not** a free provider (gmail, hotmail, yahoo...) **or** the enrichment API reports a company with 10+ employees.\n\n- **Business lead** → HubSpot create/update contact → Slack `#sales`\n- **Personal lead** → appended to the *Low priority* Google Sheet\n\nBoth branches finish in the same **Respond 200** node.",
+        "height": 380,
+        "width": 900,
+        "color": 3
+      },
+      "id": "a1000000-0000-4000-8000-000000000104",
+      "name": "Note: Routing",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1540, -40]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "Lead Form Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [80, 120],
+      "webhookId": "00000000-0000-4000-8000-0000000000a1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalise the incoming form payload and validate it.\n// Runs once for all items; each webhook call is a single item.\nconst FREE_DOMAINS = new Set([\n  'gmail.com', 'googlemail.com', 'hotmail.com', 'outlook.com', 'live.com',\n  'yahoo.com', 'ymail.com', 'icloud.com', 'me.com', 'aol.com', 'proton.me',\n  'protonmail.com', 'gmx.com', 'mail.com', 'msn.com'\n]);\nconst EMAIL_RE = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/;\n\nconst trim = (v) => (typeof v === 'string' ? v.trim() : v ?? '');\n\nreturn $input.all().map((item) => {\n  const body = item.json.body || {};\n  const errors = [];\n\n  const rawName = trim(body.name);\n  const email = trim(body.email).toLowerCase();\n  const company = trim(body.company);\n  const message = trim(body.message);\n  const source = trim(body.source) || 'website';\n\n  if (!rawName) errors.push('name is required');\n  if (!email) errors.push('email is required');\n  else if (!EMAIL_RE.test(email)) errors.push('email format is invalid');\n  if (message.length > 5000) errors.push('message is too long (max 5000 chars)');\n\n  const parts = rawName.split(/\\s+/).filter(Boolean);\n  const firstName = parts[0] || '';\n  const lastName = parts.slice(1).join(' ');\n  const domain = email.includes('@') ? email.split('@')[1] : '';\n\n  return {\n    json: {\n      valid: errors.length === 0,\n      errors,\n      firstName,\n      lastName,\n      fullName: rawName,\n      email,\n      domain,\n      isFreeDomain: FREE_DOMAINS.has(domain),\n      company,\n      message,\n      source,\n      receivedAt: new Date().toISOString(),\n    },\n  };\n});"
+      },
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Normalise & Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 120]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1000000-0000-4000-8000-000000000001",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "Is Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [760, 120]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'rejected', errors: $json.errors } }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "Respond 400 (Reject)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1060, 340]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.example-enrichment.com/v1/person",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "email",
+              "value": "={{ $json.email }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "Enrich Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1060, 120],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CRED_ID_ENRICHMENT",
+          "name": "Enrichment API (Header Auth)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Combine the normalised lead with whatever the enrichment API returned.\n// This node receives items from BOTH outputs of \"Enrich Lead\":\n//  - success output: $json is the API response\n//  - error output:   $json carries an `error` property (API failed after retries)\nconst lead = $('Normalise & Validate').item.json;\nconst api = $json || {};\nconst enrichmentFailed = Boolean(api.error) || Object.keys(api).length === 0;\n\n// Adapt these paths to your enrichment vendor's response shape.\nconst enrichment = enrichmentFailed\n  ? { status: 'unavailable', companyName: '', companySize: null, industry: '', linkedin: '' }\n  : {\n      status: 'ok',\n      companyName: api.company?.name || '',\n      companySize: api.company?.employees ?? null,\n      industry: api.company?.industry || '',\n      linkedin: api.person?.linkedin || '',\n    };\n\nconst BUSINESS_SIZE_THRESHOLD = 10;\nconst isBusiness =\n  !lead.isFreeDomain ||\n  (typeof enrichment.companySize === 'number' && enrichment.companySize >= BUSINESS_SIZE_THRESHOLD);\n\nreturn {\n  json: {\n    ...lead,\n    enrichment,\n    isBusiness,\n    route: isBusiness ? 'crm' : 'low-priority-sheet',\n    companyName: lead.company || enrichment.companyName || lead.domain,\n  },\n};"
+      },
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "name": "Build Lead Profile",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 120]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1000000-0000-4000-8000-000000000002",
+              "leftValue": "={{ $json.isBusiness }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000007",
+      "name": "Business Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1600, 120]
+    },
+    {
+      "parameters": {
+        "authentication": "appToken",
+        "resource": "contact",
+        "operation": "upsert",
+        "email": "={{ $json.email }}",
+        "additionalFields": {
+          "firstName": "={{ $json.firstName }}",
+          "lastName": "={{ $json.lastName }}",
+          "companyName": "={{ $json.companyName }}",
+          "website": "={{ $json.isFreeDomain ? '' : 'https://' + $json.domain }}",
+          "message": "={{ $json.message }}",
+          "leadStatus": "NEW"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000008",
+      "name": "HubSpot: Create/Update Contact",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.1,
+      "position": [1880, 40],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "PLACEHOLDER_CRED_ID_HUBSPOT",
+          "name": "HubSpot (Private App Token)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "accessToken",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "#sales"
+        },
+        "text": "=:new: *New business lead* from `{{ $('Build Lead Profile').item.json.source }}`\n*Name:* {{ $('Build Lead Profile').item.json.fullName }}\n*Email:* {{ $('Build Lead Profile').item.json.email }}\n*Company:* {{ $('Build Lead Profile').item.json.companyName }} ({{ $('Build Lead Profile').item.json.enrichment.companySize ?? 'size unknown' }} employees, {{ $('Build Lead Profile').item.json.enrichment.industry || 'industry unknown' }})\n*Message:* {{ ($('Build Lead Profile').item.json.message || '').slice(0, 300) }}\n*Enrichment:* {{ $('Build Lead Profile').item.json.enrichment.status }}",
+        "otherOptions": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000009",
+      "name": "Slack: Notify #sales",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [2140, 40],
+      "credentials": {
+        "slackApi": {
+          "id": "PLACEHOLDER_CRED_ID_SLACK",
+          "name": "Slack Bot Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "PLACEHOLDER_SPREADSHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Low priority"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "received_at": "={{ $json.receivedAt }}",
+            "name": "={{ $json.fullName }}",
+            "email": "={{ $json.email }}",
+            "domain": "={{ $json.domain }}",
+            "company": "={{ $json.companyName }}",
+            "source": "={{ $json.source }}",
+            "message": "={{ $json.message }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            { "id": "received_at", "displayName": "received_at", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "name", "displayName": "name", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "email", "displayName": "email", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "domain", "displayName": "domain", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "company", "displayName": "company", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "source", "displayName": "source", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "message", "displayName": "message", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000010",
+      "name": "Google Sheets: Low Priority",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1880, 260],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "PLACEHOLDER_CRED_ID_GSHEETS",
+          "name": "Google Sheets (OAuth2)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: 'accepted', email: $('Build Lead Profile').item.json.email, route: $('Build Lead Profile').item.json.route } }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000011",
+      "name": "Respond 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2400, 160]
+    }
+  ],
+  "connections": {
+    "Lead Form Webhook": {
+      "main": [
+        [
+          { "node": "Normalise & Validate", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Normalise & Validate": {
+      "main": [
+        [
+          { "node": "Is Valid?", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Is Valid?": {
+      "main": [
+        [
+          { "node": "Enrich Lead", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Respond 400 (Reject)", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Enrich Lead": {
+      "main": [
+        [
+          { "node": "Build Lead Profile", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Build Lead Profile", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Build Lead Profile": {
+      "main": [
+        [
+          { "node": "Business Lead?", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Business Lead?": {
+      "main": [
+        [
+          { "node": "HubSpot: Create/Update Contact", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Google Sheets: Low Priority", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "HubSpot: Create/Update Contact": {
+      "main": [
+        [
+          { "node": "Slack: Notify #sales", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Slack: Notify #sales": {
+      "main": [
+        [
+          { "node": "Respond 200", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Google Sheets: Low Priority": {
+      "main": [
+        [
+          { "node": "Respond 200", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "PLACEHOLDER_INSTANCE_ID",
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

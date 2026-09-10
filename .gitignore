@@ -1,0 +1,24 @@
+# secrets / local config
+.env
+.env.*
+!.env.example
+*.credentials.json
+credentials/
+
+# n8n exports with real data
+*.local.json
+exports/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# node
+node_modules/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

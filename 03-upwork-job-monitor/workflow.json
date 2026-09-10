@@ -1,0 +1,326 @@
+{
+  "name": "03 - Upwork Job Monitor (RSS → Claude fit score → Telegram)",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 1. Poll & configure\n\nRuns every **15 minutes**.\n\n**Config** (Set node) is the single place to change behaviour:\n- `feedUrl` – placeholder; the real feed source is confirmed in a later phase (Upwork RSS availability varies; Vollna or a scraper are alternatives). You can also use `{{ $env.JOBS_FEED_URL }}` if env access is enabled on your instance.\n- `keywords` – case-insensitive match against title + description\n- `minBudget` – jobs below this (when a budget is detectable) are dropped\n- `minFit` – threshold for the Telegram alert\n- `telegramChatId` – where alerts go\n- `systemPrompt` – the freelancer profile Claude scores against",
+        "height": 420,
+        "width": 620,
+        "color": 4
+      },
+      "id": "c3000000-0000-4000-8000-000000000101",
+      "name": "Note: Config",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [0, -140]
+    },
+    {
+      "parameters": {
+        "content": "## 2. Filter, parse budget, dedupe\n\nOne Code node does the cheap work *before* we pay for an LLM call:\n- keyword filter (any keyword in title/description)\n- budget parsing from the HTML description (`Budget: $500` or `Hourly Range: $30-$50`)\n- min-budget check\n- dedupe with `$getWorkflowStaticData('global').seenGuids` so each job is scored only once (last 2 000 GUIDs kept)\n\nIf nothing new matches, the node outputs 0 items and the run ends here.",
+        "height": 420,
+        "width": 420,
+        "color": 5
+      },
+      "id": "c3000000-0000-4000-8000-000000000102",
+      "name": "Note: Filter",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [660, -140]
+    },
+    {
+      "parameters": {
+        "content": "## 3. Score with Claude\n\nDirect call to the Anthropic Messages API (`claude-opus-5`, `max_tokens` 1024). The system prompt holds a short freelancer profile and asks for strict JSON `{ \"fit\": 1-10, \"reasons\": [...] }`.\n\n**Parse Score** extracts the first text block, strips code fences if any, and `JSON.parse`s it. A parse failure yields `fit: 0` with the reason `parse_error` instead of crashing the run.\n\nNode is set to *retry 2x* and *continue on error* (regular output) so one bad response doesn't kill the batch.",
+        "height": 420,
+        "width": 520,
+        "color": 6
+      },
+      "id": "c3000000-0000-4000-8000-000000000103",
+      "name": "Note: Scoring",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1120, -140]
+    },
+    {
+      "parameters": {
+        "content": "## 4. Alert\n\n`fit >= minFit` → Telegram message with title, budget, score, top 2 reasons and the link. Everything else is discarded (NoOp) but still marked as seen, so it will not be re-scored.",
+        "height": 420,
+        "width": 520,
+        "color": 3
+      },
+      "id": "c3000000-0000-4000-8000-000000000104",
+      "name": "Note: Alert",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1680, -140]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "c3000000-0000-4000-8000-000000000001",
+      "name": "Every 15 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [80, 340]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "s3000000-0000-4000-8000-000000000001",
+              "name": "feedUrl",
+              "value": "https://jobs-feed.example.com/rss/n8n-automation.xml",
+              "type": "string"
+            },
+            {
+              "id": "s3000000-0000-4000-8000-000000000002",
+              "name": "keywords",
+              "value": "={{ ['n8n', 'automation', 'make.com', 'ai agent', 'rag', 'workflow', 'zapier'] }}",
+              "type": "array"
+            },
+            {
+              "id": "s3000000-0000-4000-8000-000000000003",
+              "name": "minBudget",
+              "value": 300,
+              "type": "number"
+            },
+            {
+              "id": "s3000000-0000-4000-8000-000000000004",
+              "name": "minFit",
+              "value": 7,
+              "type": "number"
+            },
+            {
+              "id": "s3000000-0000-4000-8000-000000000005",
+              "name": "telegramChatId",
+              "value": "PLACEHOLDER_TELEGRAM_CHAT_ID",
+              "type": "string"
+            },
+            {
+              "id": "s3000000-0000-4000-8000-000000000006",
+              "name": "systemPrompt",
+              "value": "You are screening freelance job posts for a specific freelancer and must decide how good a fit each post is.\n\nFreelancer profile: n8n / AI automation engineer, Python/TypeScript, 6+ years of backend experience. Builds production n8n workflows, API integrations, webhook pipelines, RAG and LLM-agent automations, and migrations from Zapier/Make.com. Prefers well-scoped projects with a clear business outcome and a budget consistent with senior work; not interested in pure front-end, WordPress theming, data-entry, or jobs that only want a no-code beginner.\n\nRespond with ONLY a JSON object, no prose and no code fences, in exactly this shape:\n{\"fit\": <integer 1-10>, \"reasons\": [\"<short reason>\", \"<short reason>\", \"<short reason>\"]}\n\nScoring guide: 9-10 = ideal match in skills, scope and budget; 7-8 = good match with minor concerns; 4-6 = partial match or unclear scope/budget; 1-3 = poor match.",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "c3000000-0000-4000-8000-000000000002",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [300, 340]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.feedUrl }}",
+        "options": {}
+      },
+      "id": "c3000000-0000-4000-8000-000000000003",
+      "name": "Read Jobs Feed",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1,
+      "position": [520, 340],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Keyword filter + budget parsing + dedupe. Runs once for all RSS items.\nconst cfg = $('Config').first().json;\nconst keywords = (cfg.keywords || []).map((k) => String(k).toLowerCase());\nconst minBudget = Number(cfg.minBudget) || 0;\nconst MAX_SEEN = 2000;\n\nconst store = $getWorkflowStaticData('global');\nstore.seenGuids = Array.isArray(store.seenGuids) ? store.seenGuids : [];\nconst seen = new Set(store.seenGuids);\n\nconst stripHtml = (s) => String(s || '')\n  .replace(/<br\\s*\\/?>/gi, '\\n')\n  .replace(/<[^>]+>/g, ' ')\n  .replace(/&nbsp;/g, ' ')\n  .replace(/&amp;/g, '&')\n  .replace(/&quot;/g, '\"')\n  .replace(/&#39;/g, \"'\")\n  .replace(/[ \\t]+/g, ' ')\n  .trim();\n\n// Returns { type: 'fixed'|'hourly'|'unknown', min, max, label }\nconst parseBudget = (text) => {\n  const fixed = text.match(/budget\\s*:?\\s*\\$\\s*([\\d,]+(?:\\.\\d+)?)/i);\n  if (fixed) {\n    const v = Number(fixed[1].replace(/,/g, ''));\n    return { type: 'fixed', min: v, max: v, label: `$${v} fixed` };\n  }\n  const hourly = text.match(/hourly(?:\\s*range)?\\s*:?\\s*\\$\\s*([\\d,]+(?:\\.\\d+)?)\\s*(?:-|–|to)\\s*\\$?\\s*([\\d,]+(?:\\.\\d+)?)/i);\n  if (hourly) {\n    const lo = Number(hourly[1].replace(/,/g, ''));\n    const hi = Number(hourly[2].replace(/,/g, ''));\n    return { type: 'hourly', min: lo, max: hi, label: `$${lo}-$${hi}/hr` };\n  }\n  return { type: 'unknown', min: null, max: null, label: 'not specified' };\n};\n\nconst out = [];\nfor (const item of $input.all()) {\n  const job = item.json;\n  const guid = String(job.guid || job.link || job.title || '');\n  if (!guid || seen.has(guid)) continue;\n\n  const title = String(job.title || '');\n  const description = stripHtml(job.content || job.contentSnippet || job.description || '');\n  const haystack = `${title}\\n${description}`.toLowerCase();\n  const matched = keywords.filter((k) => haystack.includes(k));\n\n  // Mark as seen regardless of the outcome so we never re-process the same post.\n  seen.add(guid);\n  store.seenGuids.push(guid);\n  if (matched.length === 0) continue;\n\n  const budget = parseBudget(description);\n  // Hourly jobs are compared on the max rate * 10h as a rough floor; unknown budgets pass through.\n  const comparable = budget.type === 'fixed' ? budget.min : budget.type === 'hourly' ? budget.max * 10 : null;\n  if (comparable !== null && comparable < minBudget) continue;\n\n  out.push({\n    json: {\n      guid,\n      title,\n      link: job.link || '',\n      publishedAt: job.isoDate || job.pubDate || '',\n      description: description.slice(0, 3000),\n      matchedKeywords: matched,\n      budget,\n      promptText: `Job title: ${title}\\nBudget: ${budget.label}\\nMatched keywords: ${matched.join(', ')}\\n\\nDescription:\\n${description.slice(0, 3000)}`,\n    },\n  });\n}\n\nif (store.seenGuids.length > MAX_SEEN) store.seenGuids = store.seenGuids.slice(-MAX_SEEN);\nreturn out;"
+      },
+      "id": "c3000000-0000-4000-8000-000000000004",
+      "name": "Filter, Parse Budget, Dedupe",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, 340]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'claude-opus-5',\n  max_tokens: 1024,\n  system: $('Config').first().json.systemPrompt,\n  messages: [\n    { role: 'user', content: $json.promptText }\n  ]\n}) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "c3000000-0000-4000-8000-000000000005",
+      "name": "Score with Claude",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1180, 340],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER_CRED_ID_ANTHROPIC",
+          "name": "Anthropic API (x-api-key header)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Parse Claude's JSON answer and merge it back onto the job.\nconst job = $('Filter, Parse Budget, Dedupe').item.json;\nconst resp = $json || {};\n\nlet fit = 0;\nlet reasons = [];\nlet scoringError = null;\n\nif (resp.error) {\n  scoringError = typeof resp.error === 'string' ? resp.error : (resp.error.message || JSON.stringify(resp.error));\n} else {\n  const textBlock = Array.isArray(resp.content) ? resp.content.find((b) => b.type === 'text') : null;\n  const raw = (textBlock?.text || '').trim().replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```$/, '');\n  try {\n    const start = raw.indexOf('{');\n    const end = raw.lastIndexOf('}');\n    const parsed = JSON.parse(start >= 0 && end > start ? raw.slice(start, end + 1) : raw);\n    fit = Math.max(0, Math.min(10, Math.round(Number(parsed.fit) || 0)));\n    reasons = Array.isArray(parsed.reasons) ? parsed.reasons.map(String).slice(0, 5) : [];\n  } catch (e) {\n    scoringError = `parse_error: ${e.message}`;\n    reasons = ['parse_error'];\n  }\n}\n\nreturn {\n  json: {\n    ...job,\n    fit,\n    reasons,\n    scoringError,\n    usage: resp.usage || null,\n  },\n};"
+      },
+      "id": "c3000000-0000-4000-8000-000000000006",
+      "name": "Parse Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1420, 340]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c3000000-0000-4000-8000-000000000201",
+              "leftValue": "={{ $json.fit }}",
+              "rightValue": "={{ $('Config').first().json.minFit }}",
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c3000000-0000-4000-8000-000000000007",
+      "name": "Fit ≥ 7?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1700, 340]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Config').first().json.telegramChatId }}",
+        "text": "=🎯 *{{ $json.title.replace(/[*_`\\[]/g, '') }}*\n💰 Budget: {{ $json.budget.label }}\n📈 Fit: *{{ $json.fit }}/10*\n{{ ($json.reasons || []).slice(0, 2).map(r => '• ' + r.replace(/[*_`\\[]/g, '')).join('\\n') }}\n🔑 {{ ($json.matchedKeywords || []).join(', ') }}\n\n{{ $json.link }}",
+        "additionalFields": {
+          "parse_mode": "Markdown",
+          "appendAttribution": false,
+          "disable_web_page_preview": true
+        }
+      },
+      "id": "c3000000-0000-4000-8000-000000000008",
+      "name": "Telegram: Send Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1960, 240],
+      "credentials": {
+        "telegramApi": {
+          "id": "PLACEHOLDER_CRED_ID_TELEGRAM",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "c3000000-0000-4000-8000-000000000009",
+      "name": "Skip (low fit)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1960, 460]
+    }
+  ],
+  "connections": {
+    "Every 15 min": {
+      "main": [
+        [
+          { "node": "Config", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          { "node": "Read Jobs Feed", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Read Jobs Feed": {
+      "main": [
+        [
+          { "node": "Filter, Parse Budget, Dedupe", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Filter, Parse Budget, Dedupe": {
+      "main": [
+        [
+          { "node": "Score with Claude", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Score with Claude": {
+      "main": [
+        [
+          { "node": "Parse Score", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Parse Score": {
+      "main": [
+        [
+          { "node": "Fit ≥ 7?", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Fit ≥ 7?": {
+      "main": [
+        [
+          { "node": "Telegram: Send Alert", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Skip (low fit)", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "PLACEHOLDER_INSTANCE_ID",
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
